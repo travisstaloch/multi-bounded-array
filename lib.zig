@@ -384,20 +384,20 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
 
 test "basic" {
     const T = struct { int: u8, float: f32 };
+
     var a = MultiBoundedArray(T, 64){};
     try testing.expectEqual(0, a.len);
     try a.append(.{ .int = 1, .float = 1 });
     const mut_ints = a.items(.int);
-    // items() slice constness is inherited
-    try testing.expectEqual([]u8, @TypeOf(mut_ints));
+    try testing.expectEqual([]u8, @TypeOf(mut_ints)); // items() slice constness is inherited
     try testing.expectEqual(1, mut_ints.len);
     try testing.expectEqual(1, mut_ints[0]);
     mut_ints[0] = 2;
+
     const a_const_copy = a;
     mut_ints[0] = 3;
     const const_ints = a_const_copy.items(.int);
-    // items() slice constness is inherited
-    try testing.expectEqual([]const u8, @TypeOf(const_ints));
+    try testing.expectEqual([]const u8, @TypeOf(const_ints)); // items() slice constness is inherited
     try testing.expectEqual(2, const_ints[0]);
 }
 
