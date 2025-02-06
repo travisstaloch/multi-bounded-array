@@ -3,12 +3,11 @@ Similar to std.MultiArrayList() but backed by fixed size arrays with a
 shared runtime length.
 
 Each field of T becomes an array with max length `buffer_capacity`.  To
-access the arrays as slices use `items(field)` or `constItems(field)`.
+access the arrays as slices use `items(.<field>)` or `constItems(.<field>)`.
 
 Useful when a struct of small arrays is desired with capacity that is
 known at compile time.  Like std.BoundedArray, MultiBoundedArrays are only
 values and thus may be copied.
-
 
 # Usage
 
@@ -53,3 +52,8 @@ test "basic" {
     try testing.expectEqual(2, const_ints[0]);
 }
 ```
+
+# Todo
+
+[x] - support tagged unions and sorting
+[x] - add tests from std.MultiArrayList

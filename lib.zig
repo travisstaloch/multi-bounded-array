@@ -4,35 +4,37 @@ const mem = std.mem;
 const meta = std.meta;
 const testing = std.testing;
 
+pub const Error = error{Overflow};
+
 ///
 /// Similar to std.MultiArrayList() but backed by fixed size arrays with a
 /// shared runtime length.
 ///
 /// Each field of T becomes an array with max length `buffer_capacity`.  To
-/// access the arrays as slices use `items(field)` or `constItems(field)`.
+/// access the arrays as slices use `items(.<field>)` or `constItems(.<field>)`.
 ///
 /// Useful when a struct of small arrays is desired with capacity that is
 /// known at compile time.  Like std.BoundedArray, MultiBoundedArrays are only
 /// values and thus may be copied.
 ///
 /// ```zig
-/// test "basic" {
-///    const T = struct { int: u8, float: f32 };
-///    var a = MultiBoundedArray(T, 64){};
-///    try testing.expectEqual(0, a.len);
-///    try a.append(.{ .int = 1, .float = 1 });
-///    const mut_ints = a.items(.int);
-///    // items() slice constness is inherited
-///    try testing.expectEqual([]u8, @TypeOf(mut_ints));
-///    try testing.expectEqual(1, mut_ints.len);
-///    try testing.expectEqual(1, mut_ints[0]);
-///    mut_ints[0] = 2;
-///    const a_const_copy = a;
-///    mut_ints[0] = 3;
-///    const const_ints = a_const_copy.items(.int);
-///    // items() slice constness is inherited
-///    try testing.expectEqual([]const u8, @TypeOf(const_ints));
-///    try testing.expectEqual(2, const_ints[0]);
+/// test "readme" {
+///     const T = struct { int: u8, float: f32 };
+///
+///     var a = MultiBoundedArray(T, 64){};
+///     try testing.expectEqual(0, a.len);
+///     try a.append(.{ .int = 1, .float = 1 });
+///     const mut_ints = a.items(.int);
+///     try testing.expectEqual([]u8, @TypeOf(mut_ints)); // items() slice constness is inherited
+///     try testing.expectEqual(1, mut_ints.len);
+///     try testing.expectEqual(1, mut_ints[0]);
+///     mut_ints[0] = 2;
+///
+///     const a_const_copy = a;
+///     mut_ints[0] = 3;
+///     const const_ints = a_const_copy.items(.int);
+///     try testing.expectEqual([]const u8, @TypeOf(const_ints)); // items() slice constness is inherited
+///     try testing.expectEqual(2, const_ints[0]);
 /// }
 /// ```
 pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type {
@@ -41,8 +43,48 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         soa: StructOfArrays = undefined,
         len: usize = 0,
 
-        pub const Child = T;
-        pub const byte_size = @sizeOf(Self);
+        pub const Elem = switch (@typeInfo(T)) {
+            .@"struct" => T,
+            .@"union" => |u| struct {
+                tags: Tag,
+                data: Bare,
+
+                pub const Bare = blk: {
+                    @setRuntimeSafety(false);
+                    break :blk @Type(.{ .@"union" = .{
+                        .layout = u.layout,
+                        .tag_type = null,
+                        .fields = u.fields,
+                        .decls = &.{},
+                    } });
+                };
+                pub const Tag = u.tag_type orelse
+                    @compileError("MultiBoundedArray does not support untagged unions");
+
+                pub fn fromT(outer: T) @This() {
+                    const tag = meta.activeTag(outer);
+                    return .{
+                        .tags = tag,
+                        .data = switch (tag) {
+                            inline else => |t| @unionInit(Bare, @tagName(t), @field(outer, @tagName(t))),
+                        },
+                    };
+                }
+
+                pub fn toT(tag: Tag, bare: Bare) T {
+                    return switch (tag) {
+                        inline else => |t| @unionInit(T, @tagName(t), @field(bare, @tagName(t))),
+                    };
+                }
+            },
+            else => @compileError("MultiBoundedArray only supports structs and tagged unions"),
+        };
+        const fields = meta.fields(Elem);
+        const Field = meta.FieldEnum(Elem);
+        fn FieldType(comptime field: Field) type {
+            return meta.fieldInfo(StructOfArrays, field).type;
+        }
+
         pub const StructOfArrays = blk: {
             var res: [fields.len]std.builtin.Type.StructField = undefined;
             for (0..fields.len) |i| {
@@ -96,15 +138,9 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
             } });
         }
 
-        const fields = meta.fields(T);
-        const Field = meta.FieldEnum(T);
-        fn FieldType(comptime field: Field) type {
-            return meta.fieldInfo(StructOfArrays, field).type;
-        }
-
         /// Init with a possibly runtime length.
         /// Returns error.Overflow if len exceeds buffer_capacity.
-        pub fn init(len: usize) error{Overflow}!Self {
+        pub fn init(len: usize) Error!Self {
             if (len > buffer_capacity) return error.Overflow;
             return Self{ .len = len };
         }
@@ -138,7 +174,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
 
         /// Set self.len to len.
         /// Return error.Overflow when len > buffer_capacity.
-        pub fn resize(self: *Self, len: usize) error{Overflow}!void {
+        pub fn resize(self: *Self, len: usize) Error!void {
             if (len > buffer_capacity) return error.Overflow;
             self.len = len;
         }
@@ -149,7 +185,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         }
 
         /// Copy contents of an existing slice.
-        pub fn fromSlice(m: []const T) error{Overflow}!Self {
+        pub fn fromSlice(m: []const T) Error!Self {
             var self = try init(m.len);
             inline for (fields) |f| {
                 for (0..m.len) |i| {
@@ -160,7 +196,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         }
 
         /// Copy contents of an existing struct of slices
-        pub fn fromSoa(soa: Slices(*const StructOfArrays)) error{Overflow}!Self {
+        pub fn fromSoa(soa: Slices(*const StructOfArrays)) Error!Self {
             var self: Self = .{};
             const src0 = @field(soa, fields[0].name);
             const len = src0.len;
@@ -178,18 +214,26 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         /// Construct and return the element at index `i`.
         pub fn get(self: Self, i: usize) T {
             assert(i < self.len);
-            var t: T = undefined;
+            var result: Elem = undefined;
             inline for (fields) |f| {
-                @field(t, f.name) = @field(self.soa, f.name)[i];
+                @field(result, f.name) = @field(self.soa, f.name)[i];
             }
-            return t;
+            return switch (@typeInfo(T)) {
+                .@"struct" => result,
+                .@"union" => Elem.toT(result.tags, result.data),
+                else => unreachable,
+            };
         }
 
         /// Set the value of the element at index `i`.
-        pub fn set(self: *Self, i: usize, item: T) void {
-            assert(i < self.len);
-            inline for (fields) |f| {
-                @field(self.soa, f.name)[i] = @field(item, f.name);
+        pub fn set(self: *Self, i: usize, elem: T) void {
+            const e = switch (@typeInfo(T)) {
+                .@"struct" => elem,
+                .@"union" => Elem.fromT(elem),
+                else => unreachable,
+            };
+            inline for (fields, 0..) |field_info, fi| {
+                self.items(@as(Field, @enumFromInt(fi)))[i] = @field(e, field_info.name);
             }
         }
 
@@ -199,7 +243,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         }
 
         /// Check that there is space for `additional_count` items.
-        pub fn ensureUnusedCapacity(self: Self, additional_count: usize) error{Overflow}!void {
+        pub fn ensureUnusedCapacity(self: Self, additional_count: usize) Error!void {
             if (self.len + additional_count > buffer_capacity) {
                 return error.Overflow;
             }
@@ -213,27 +257,46 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
             return self.get(new_len);
         }
 
-        /// Remove and return the last element, or null if the slice is empty.
+        /// Remove and return the last element, or null if the list is empty.
         pub fn popOrNull(self: *Self) ?T {
             return if (self.len == 0) null else self.pop();
         }
 
-        /// Insert item at index `i` by moving slice[n .. slice.len] to make room.
-        /// This operation is O(N*M) where M is the number of fields.
-        pub fn insert(self: *Self, i: usize, item: T) error{Overflow}!void {
-            if (i > self.len + 1) return error.Overflow;
-            try self.resize(self.len + 1);
-            inline for (fields, 0..) |f, fi| {
-                const s = self.items(@enumFromInt(fi));
-                mem.copyBackwards(f.type, s[i + 1 .. s.len], s[i .. s.len - 1]);
-                s[i] = @field(item, f.name);
+        /// Inserts an item into an ordered list.  Shifts all elements
+        /// after and including the specified index back by one and
+        /// sets the given index to the specified element.
+        pub fn insert(self: *Self, index: usize, elem: T) Error!void {
+            try self.ensureUnusedCapacity(1);
+            self.insertAssumeCapacity(index, elem);
+        }
+
+        /// Inserts an item into an ordered list which has room for it.
+        /// Shifts all elements after and including the specified index
+        /// back by one and sets the given index to the specified element.
+        pub fn insertAssumeCapacity(self: *Self, index: usize, elem: T) void {
+            assert(self.len < buffer_capacity);
+            assert(index <= self.len);
+            self.len += 1;
+            const entry = switch (@typeInfo(T)) {
+                .@"struct" => elem,
+                .@"union" => Elem.fromT(elem),
+                else => unreachable,
+            };
+            const sliced = self.slices();
+            inline for (fields) |field_info| {
+                const field_slice = @field(sliced, field_info.name);
+                var i: usize = self.len - 1;
+                while (i > index) : (i -= 1) {
+                    field_slice[i] = field_slice[i - 1];
+                }
+                field_slice[index] = @field(entry, field_info.name);
             }
         }
 
-        /// For each field insert other.items(field) at index `i` and move slice[i .. slice.len] to make room.
+        /// For each field insert other.items(.<field>) at index `i` and move slice[i .. slice.len] to make room.
         /// This operation is O(N*M) where M is the number of fields.
         /// `other` should be a MultiBoundedArray
-        pub fn insertMulti(self: *Self, i: usize, other: anytype) error{Overflow}!void {
+        pub fn insertMulti(self: *Self, i: usize, other: anytype) Error!void {
             try self.ensureUnusedCapacity(other.len);
             self.len += other.len;
             inline for (fields, 0..) |f, fi| {
@@ -254,7 +317,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         //     start: usize,
         //     len: usize,
         //     new_items: []const T,
-        // ) error{Overflow}!void {
+        // ) Error!void {
         //     const after_range = start + len;
         //     var range = self.slice()[start..after_range];
 
@@ -275,27 +338,37 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         //     }
         // }
 
-        /// Try to make room and then extend the slice by 1 element.
-        pub fn append(self: *Self, item: T) error{Overflow}!void {
-            const i = self.len;
-            try self.resize(self.len + 1);
-            inline for (fields) |f| {
-                @field(self.soa, f.name)[i] = @field(item, f.name);
-            }
+        /// Try to make room and then extend the list by 1 element.
+        pub fn append(self: *Self, item: T) Error!void {
+            try self.ensureUnusedCapacity(1);
+            self.appendAssumeCapacity(item);
         }
 
-        /// Extend the slice by 1 element.  Asserts that there is space for it.
+        /// Extend the list by 1 element.  Asserts that there is space for it.
         pub fn appendAssumeCapacity(self: *Self, item: T) void {
             assert(self.len < buffer_capacity);
-            inline for (fields) |f| {
-                @field(self.soa, f.name)[self.len] = @field(item, f.name);
-            }
+            const len = self.len;
             self.len += 1;
+            self.set(len, item);
+        }
+
+        pub fn addOne(self: *Self) Error!usize {
+            try self.ensureUnusedCapacity(1);
+            return self.addOneAssumeCapacity();
+        }
+
+        /// Extend the list by 1 element, asserting `buffer_capacity`
+        /// is sufficient to hold an additional item.  Returns the
+        /// newly reserved index with uninitialized data.
+        pub fn addOneAssumeCapacity(self: *Self) usize {
+            assert(self.len < buffer_capacity);
+            defer self.len += 1;
+            return self.len;
         }
 
         /// Remove the element at index `i`, shift elements after `i` back, and
         /// return the removed element.
-        /// Asserts the slice has at least one item.
+        /// Asserts the list has at least one item.
         /// This operation is O(N*M) where M is the number of fields.
         pub fn orderedRemove(self: *Self, i: usize) T {
             const newlen = self.len - 1;
@@ -311,7 +384,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         }
 
         /// Remove the element at index `i` and return it.
-        /// The empty slot is replaced by the element the end of the slice.
+        /// The empty slot is replaced by the element the end of the list.
         /// This operation is O(1).
         pub fn swapRemove(self: *Self, i: usize) T {
             if (self.len - 1 == i) return self.pop();
@@ -323,7 +396,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         /// Make room then append each slice of items from `other` to self.
         /// `other` may be a MultiBoundedArray of T and any buffer_capacity or a
         /// std.MultiArrayList(T).
-        pub fn appendMulti(self: *Self, other: anytype) error{Overflow}!void {
+        pub fn appendMulti(self: *Self, other: anytype) Error!void {
             try self.ensureUnusedCapacity(other.len);
             self.appendMultiAssumeCapacity(other);
         }
@@ -346,7 +419,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
 
         /// Append contents of an existing struct of slices.
         /// Returns error.Overflow if there is not enough room.
-        pub fn appendSoa(self: *Self, soa: Slices(*const StructOfArrays)) error{Overflow}!void {
+        pub fn appendSoa(self: *Self, soa: Slices(*const StructOfArrays)) Error!void {
             const src0 = @field(soa, fields[0].name);
             const len = src0.len;
             try self.resize(self.len + len);
@@ -360,7 +433,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
         }
 
         /// Append `value` `n` times.
-        pub fn appendNTimes(self: *Self, value: T, n: usize) error{Overflow}!void {
+        pub fn appendNTimes(self: *Self, value: T, n: usize) Error!void {
             const old_len = self.len;
             try self.resize(old_len + n);
             inline for (fields, 0..) |f, fi| {
@@ -369,7 +442,7 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
             }
         }
 
-        /// Append `value` to the slice `n` times.  Asserts that there is room.
+        /// Append `value` to the list `n` times.  Asserts that there is room.
         pub fn appendNTimesAssumeCapacity(self: *Self, value: T, n: usize) void {
             const old_len = self.len;
             self.len += n;
@@ -379,10 +452,79 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
                 @memset(dest, @field(value, f.name));
             }
         }
+
+        /// `ctx` has the following method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        fn sortInternal(self: *Self, a: usize, b: usize, ctx: anytype, comptime mode: std.sort.Mode) void {
+            const sort_context: struct {
+                sub_ctx: @TypeOf(ctx),
+                slice: Slices(*StructOfArrays),
+
+                pub fn swap(sc: @This(), a_index: usize, b_index: usize) void {
+                    inline for (fields, 0..) |field_info, i| {
+                        if (@sizeOf(field_info.type) != 0) {
+                            const field: Field = @enumFromInt(i);
+                            const ptr = @field(sc.slice, @tagName(field));
+                            mem.swap(field_info.type, &ptr[a_index], &ptr[b_index]);
+                        }
+                    }
+                }
+
+                pub fn lessThan(sc: @This(), a_index: usize, b_index: usize) bool {
+                    return sc.sub_ctx.lessThan(a_index, b_index);
+                }
+            } = .{
+                .sub_ctx = ctx,
+                .slice = self.slices(),
+            };
+
+            switch (mode) {
+                .stable => mem.sortContext(a, b, sort_context),
+                .unstable => mem.sortUnstableContext(a, b, sort_context),
+            }
+        }
+
+        /// This function guarantees a stable sort, i.e the relative order of equal elements is preserved during sorting.
+        /// Read more about stable sorting here: https://en.wikipedia.org/wiki/Sorting_algorithm#Stability
+        /// If this guarantee does not matter, `sortUnstable` might be a faster alternative.
+        /// `ctx` has the following method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        pub fn sort(self: *Self, ctx: anytype) void {
+            self.sortInternal(0, self.len, ctx, .stable);
+        }
+
+        /// Sorts only the subsection of items between indices `a` and `b` (excluding `b`)
+        /// This function guarantees a stable sort, i.e the relative order of equal elements is preserved during sorting.
+        /// Read more about stable sorting here: https://en.wikipedia.org/wiki/Sorting_algorithm#Stability
+        /// If this guarantee does not matter, `sortSpanUnstable` might be a faster alternative.
+        /// `ctx` has the following method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        pub fn sortSpan(self: *Self, a: usize, b: usize, ctx: anytype) void {
+            self.sortInternal(a, b, ctx, .stable);
+        }
+
+        /// This function does NOT guarantee a stable sort, i.e the relative order of equal elements may change during sorting.
+        /// Due to the weaker guarantees of this function, this may be faster than the stable `sort` method.
+        /// Read more about stable sorting here: https://en.wikipedia.org/wiki/Sorting_algorithm#Stability
+        /// `ctx` has the following method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        pub fn sortUnstable(self: *Self, ctx: anytype) void {
+            self.sortInternal(0, self.len, ctx, .unstable);
+        }
+
+        /// Sorts only the subsection of items between indices `a` and `b` (excluding `b`)
+        /// This function does NOT guarantee a stable sort, i.e the relative order of equal elements may change during sorting.
+        /// Due to the weaker guarantees of this function, this may be faster than the stable `sortSpan` method.
+        /// Read more about stable sorting here: https://en.wikipedia.org/wiki/Sorting_algorithm#Stability
+        /// `ctx` has the following method:
+        /// `fn lessThan(ctx: @TypeOf(ctx), a_index: usize, b_index: usize) bool`
+        pub fn sortSpanUnstable(self: *Self, a: usize, b: usize, ctx: anytype) void {
+            self.sortInternal(a, b, ctx, .unstable);
+        }
     };
 }
 
-test "basic" {
+test "readme" {
     const T = struct { int: u8, float: f32 };
 
     var a = MultiBoundedArray(T, 64){};
@@ -475,7 +617,7 @@ test MultiBoundedArray {
     try a.appendSoa(.{ .int = &int_ones, .float = &float_ones });
     try testing.expectEqual(31, a.len);
 
-    // appendMulti() with MultiArrayList
+    // appendMulti() from MultiArrayList
     try a.resize(11);
     var ma = std.MultiArrayList(T){};
     defer ma.deinit(testing.allocator);
@@ -483,7 +625,7 @@ test MultiBoundedArray {
     try a.appendMulti(ma);
     try testing.expectEqual(31, a.len);
 
-    // appendMulti() with MultiBoundedArray - same T different capacity
+    // appendMulti() from MultiBoundedArray - same T different capacity
     try a.resize(11);
     const a_10 = try MultiBoundedArray(T, 10).fromSlice(&ones);
     try a.appendMulti(a_10);
@@ -561,9 +703,10 @@ test "byte size" {
     // requries 6% more memory.
     const cap = 64;
     const MBA = MultiBoundedArray(T, cap);
-    try testing.expectEqual(968, MBA.byte_size);
+    const byte_size = @sizeOf(MBA);
+    try testing.expectEqual(968, byte_size);
     try testing.expectEqual(
-        MBA.byte_size,
+        byte_size,
         @sizeOf(usize) +
             cap * @sizeOf(u8) +
             cap * @sizeOf(u16) +
@@ -572,4 +715,310 @@ test "byte size" {
     );
     try testing.expectEqual(1032, @sizeOf(usize) + @sizeOf([cap]T));
     try testing.expectApproxEqAbs(@as(f32, 1.06), 1032.0 / 968.0, 0.01);
+}
+
+// ---
+// tests from std.MultiArrayList, copied with only slight modifications
+// ---
+
+test "basic usage" {
+    const Foo = struct {
+        a: u32,
+        b: []const u8,
+        c: u8,
+    };
+
+    var list = MultiBoundedArray(Foo, 32){};
+
+    try testing.expectEqual(@as(usize, 0), list.items(.a).len);
+
+    list.appendAssumeCapacity(.{
+        .a = 1,
+        .b = "foobar",
+        .c = 'a',
+    });
+
+    list.appendAssumeCapacity(.{
+        .a = 2,
+        .b = "zigzag",
+        .c = 'b',
+    });
+
+    try testing.expectEqualSlices(u32, list.items(.a), &[_]u32{ 1, 2 });
+    try testing.expectEqualSlices(u8, list.items(.c), &[_]u8{ 'a', 'b' });
+
+    try testing.expectEqual(@as(usize, 2), list.items(.b).len);
+    try testing.expectEqualStrings("foobar", list.items(.b)[0]);
+    try testing.expectEqualStrings("zigzag", list.items(.b)[1]);
+
+    try list.append(.{
+        .a = 3,
+        .b = "fizzbuzz",
+        .c = 'c',
+    });
+
+    try testing.expectEqualSlices(u32, list.items(.a), &[_]u32{ 1, 2, 3 });
+    try testing.expectEqualSlices(u8, list.items(.c), &[_]u8{ 'a', 'b', 'c' });
+
+    try testing.expectEqual(@as(usize, 3), list.items(.b).len);
+    try testing.expectEqualStrings("foobar", list.items(.b)[0]);
+    try testing.expectEqualStrings("zigzag", list.items(.b)[1]);
+    try testing.expectEqualStrings("fizzbuzz", list.items(.b)[2]);
+
+    // Add 6 more things to force a capacity increase.
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        try list.append(.{
+            .a = @as(u32, @intCast(4 + i)),
+            .b = "whatever",
+            .c = @as(u8, @intCast('d' + i)),
+        });
+    }
+
+    try testing.expectEqualSlices(
+        u32,
+        &[_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+        list.items(.a),
+    );
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' },
+        list.items(.c),
+    );
+
+    try list.resize(3);
+
+    try testing.expectEqualSlices(u32, list.items(.a), &[_]u32{ 1, 2, 3 });
+    try testing.expectEqualSlices(u8, list.items(.c), &[_]u8{ 'a', 'b', 'c' });
+
+    try testing.expectEqual(3, list.items(.b).len);
+    try testing.expectEqualStrings("foobar", list.items(.b)[0]);
+    try testing.expectEqualStrings("zigzag", list.items(.b)[1]);
+    try testing.expectEqualStrings("fizzbuzz", list.items(.b)[2]);
+
+    list.set(try list.addOne(), .{
+        .a = 4,
+        .b = "xnopyt",
+        .c = 'd',
+    });
+    try testing.expectEqualStrings("xnopyt", list.pop().b);
+    try testing.expectEqual('c', if (list.popOrNull()) |elem| elem.c else null);
+    try testing.expectEqual(2, list.pop().a);
+    try testing.expectEqual('a', list.pop().c);
+    try testing.expectEqual(null, list.popOrNull());
+}
+
+test "regression test for @reduce bug" {
+    const tags = [_]std.zig.Token.Tag{
+        .keyword_const,  .identifier, .equal,      .builtin,        .l_paren,
+        .string_literal, .r_paren,    .semicolon,  .keyword_pub,    .keyword_fn,
+        .identifier,     .l_paren,    .r_paren,    .identifier,     .bang,
+        .identifier,     .l_brace,    .identifier, .period,         .identifier,
+        .period,         .identifier, .l_paren,    .string_literal, .comma,
+        .period,         .l_brace,    .r_brace,    .r_paren,        .semicolon,
+        .r_brace,        .eof,
+    };
+    var list = MultiBoundedArray(
+        struct { tag: std.zig.Token.Tag, start: u32 },
+        tags.len,
+    ){};
+    for (tags) |tag| {
+        list.appendAssumeCapacity(.{ .tag = tag, .start = 0 });
+    }
+
+    try testing.expectEqualSlices(std.zig.Token.Tag, &tags, list.items(.tag));
+}
+
+test "ensure capacity on empty list" {
+    const Foo = struct {
+        a: u32,
+        b: u8,
+    };
+
+    var list = MultiBoundedArray(Foo, 10){};
+
+    try list.ensureUnusedCapacity(2);
+    list.appendAssumeCapacity(.{ .a = 1, .b = 2 });
+    list.appendAssumeCapacity(.{ .a = 3, .b = 4 });
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 3 }, list.items(.a));
+    try testing.expectEqualSlices(u8, &[_]u8{ 2, 4 }, list.items(.b));
+
+    list.len = 0;
+    list.appendAssumeCapacity(.{ .a = 5, .b = 6 });
+    list.appendAssumeCapacity(.{ .a = 7, .b = 8 });
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 5, 7 }, list.items(.a));
+    try testing.expectEqualSlices(u8, &[_]u8{ 6, 8 }, list.items(.b));
+
+    list.len = 0;
+    try list.ensureUnusedCapacity(2);
+
+    list.appendAssumeCapacity(.{ .a = 9, .b = 10 });
+    list.appendAssumeCapacity(.{ .a = 11, .b = 12 });
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 9, 11 }, list.items(.a));
+    try testing.expectEqualSlices(u8, &[_]u8{ 10, 12 }, list.items(.b));
+}
+
+test "insert elements" {
+    const Foo = struct {
+        a: u8,
+        b: u32,
+    };
+
+    var list = MultiBoundedArray(Foo, 10){};
+
+    try list.insert(0, .{ .a = 1, .b = 2 });
+    try list.ensureUnusedCapacity(1);
+    list.insertAssumeCapacity(1, .{ .a = 2, .b = 3 });
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, list.items(.a));
+    try testing.expectEqualSlices(u32, &[_]u32{ 2, 3 }, list.items(.b));
+}
+
+test "union" {
+    const Foo = union(enum) {
+        a: u32,
+        b: []const u8,
+    };
+
+    var list = MultiBoundedArray(Foo, 32){};
+
+    try testing.expectEqual(0, list.items(.tags).len);
+
+    list.appendAssumeCapacity(.{ .a = 1 });
+    list.appendAssumeCapacity(.{ .b = "zigzag" });
+
+    try testing.expectEqualSlices(meta.Tag(Foo), list.items(.tags), &.{ .a, .b });
+    try testing.expectEqual(2, list.items(.tags).len);
+
+    list.appendAssumeCapacity(.{ .b = "foobar" });
+    try testing.expectEqualStrings("zigzag", list.items(.data)[1].b);
+    try testing.expectEqualStrings("foobar", list.items(.data)[2].b);
+
+    for (0..6) |i| {
+        try list.append(.{ .a = @as(u32, @intCast(4 + i)) });
+    }
+
+    try testing.expectEqualSlices(
+        meta.Tag(Foo),
+        &.{ .a, .b, .b, .a, .a, .a, .a, .a, .a },
+        list.items(.tags),
+    );
+    try testing.expectEqual(Foo{ .a = 1 }, list.get(0));
+    try testing.expectEqual(Foo{ .b = "zigzag" }, list.get(1));
+    try testing.expectEqual(Foo{ .b = "foobar" }, list.get(2));
+    try testing.expectEqual(Foo{ .a = 4 }, list.get(3));
+    try testing.expectEqual(Foo{ .a = 5 }, list.get(4));
+    try testing.expectEqual(Foo{ .a = 6 }, list.get(5));
+    try testing.expectEqual(Foo{ .a = 7 }, list.get(6));
+    try testing.expectEqual(Foo{ .a = 8 }, list.get(7));
+    try testing.expectEqual(Foo{ .a = 9 }, list.get(8));
+
+    try list.resize(3);
+
+    try testing.expectEqual(3, list.items(.tags).len);
+    try testing.expectEqualSlices(meta.Tag(Foo), list.items(.tags), &.{ .a, .b, .b });
+
+    try testing.expectEqual(Foo{ .a = 1 }, list.get(0));
+    try testing.expectEqual(Foo{ .b = "zigzag" }, list.get(1));
+    try testing.expectEqual(Foo{ .b = "foobar" }, list.get(2));
+}
+
+test "sorting a span" {
+    var list: MultiBoundedArray(struct { score: u32, chr: u8 }, 42) = .{};
+
+    for (
+        // zig fmt: off
+        [42]u8{ 'b', 'a', 'c', 'a', 'b', 'c', 'b', 'c', 'b', 'a', 'b', 'a', 'b', 'c', 'b', 'a', 'a', 'c', 'c', 'a', 'c', 'b', 'a', 'c', 'a', 'b', 'b', 'c', 'c', 'b', 'a', 'b', 'a', 'b', 'c', 'b', 'a', 'a', 'c', 'c', 'a', 'c' },
+        [42]u32{ 1,   1,   1,   2,   2,   2,   3,   3,   4,   3,   5,   4,   6,   4,   7,   5,   6,   5,   6,   7,   7,   8,   8,   8,   9,   9,  10,   9,  10,  11,  10,  12,  11,  13,  11,  14,  12,  13,  12,  13,  14,  14 },
+        // zig fmt: on
+    ) |chr, score| {
+        list.appendAssumeCapacity(.{ .chr = chr, .score = score });
+    }
+
+    const sliced = list.slices();
+    list.sortSpan(6, 21, struct {
+        chars: []const u8,
+
+        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            return ctx.chars[a] < ctx.chars[b];
+        }
+    }{ .chars = sliced.chr });
+
+    var i: u32 = undefined;
+    var j: u32 = 6;
+    var c: u8 = 'a';
+
+    while (j < 21) {
+        i = j;
+        j += 5;
+        var n: u32 = 3;
+        for (sliced.chr[i..j], sliced.score[i..j]) |chr, score| {
+            try testing.expectEqual(score, n);
+            try testing.expectEqual(chr, c);
+            n += 1;
+        }
+        c += 1;
+    }
+}
+
+test "0 sized struct field" {
+    const Foo = struct {
+        a: u0,
+        b: f32,
+    };
+
+    var list = MultiBoundedArray(Foo, 10){};
+
+    try testing.expectEqualSlices(u0, &.{}, list.items(.a));
+    try testing.expectEqualSlices(f32, &.{}, list.items(.b));
+
+    try list.append(.{ .a = 0, .b = 42.0 });
+    try testing.expectEqualSlices(u0, &.{0}, list.items(.a));
+    try testing.expectEqualSlices(f32, &.{42.0}, list.items(.b));
+
+    try list.insert(0, .{ .a = 0, .b = -1.0 });
+    try testing.expectEqualSlices(u0, &.{ 0, 0 }, list.items(.a));
+    try testing.expectEqualSlices(f32, &.{ -1.0, 42.0 }, list.items(.b));
+
+    _ = list.swapRemove(list.len - 1);
+    try testing.expectEqualSlices(u0, &.{0}, list.items(.a));
+    try testing.expectEqualSlices(f32, &.{-1.0}, list.items(.b));
+}
+
+test "0 sized struct" {
+    const Foo = struct {
+        a: u0,
+    };
+
+    var list = MultiBoundedArray(Foo, 10){};
+
+    try testing.expectEqualSlices(u0, &.{}, list.items(.a));
+
+    try list.append(.{ .a = 0 });
+    try testing.expectEqualSlices(u0, &.{0}, list.items(.a));
+
+    try list.insert(0, .{ .a = 0 });
+    try testing.expectEqualSlices(u0, &.{ 0, 0 }, list.items(.a));
+
+    _ = list.swapRemove(list.len - 1);
+    try testing.expectEqualSlices(u0, &.{0}, list.items(.a));
+}
+
+// ---
+// end tests from std.MultiArrayList
+// ---
+
+test "only store union tags once in Debug and ReleaseSafe" {
+    // from https://github.com/ziglang/zig/issues/22785#issuecomment-2639396615
+    const Tag = enum(u32) { foo, bar };
+    const TaggedUnion = union(Tag) {
+        foo: u4,
+        bar: u32,
+    };
+    const list: MultiBoundedArray(TaggedUnion, 10) = undefined;
+    try std.testing.expectEqual(4, @sizeOf(@typeInfo(@TypeOf(list.items(.tags))).pointer.child));
+    try std.testing.expectEqual(4, @sizeOf(@typeInfo(@TypeOf(list.items(.data))).pointer.child));
 }
