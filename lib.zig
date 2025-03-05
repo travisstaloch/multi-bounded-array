@@ -158,6 +158,8 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
 
         /// Get a slice of values for a specified field.
         /// If you need multiple fields, consider calling `slices()` instead.
+        /// Returns a const slice with mutability inherited from self ([]T when
+        /// self is mutable or []const T when self is const).
         pub fn items(self: anytype, comptime field: Field) switch (@TypeOf(&@field(self.soa, @tagName(field)))) {
             *FieldType(field) => []meta.Elem(FieldType(field)),
             *const FieldType(field) => []const meta.Elem(FieldType(field)),
@@ -410,9 +412,8 @@ pub fn MultiBoundedArray(comptime T: type, comptime buffer_capacity: usize) type
             const old_len = self.len;
             self.len += other.len;
             inline for (0..fields.len) |fi| {
-                const field: Field = @enumFromInt(fi);
-                const dest = self.items(field)[old_len..][0..other.len];
-                const src = other.items(field);
+                const dest = self.items(@enumFromInt(fi))[old_len..][0..other.len];
+                const src = other.items(@enumFromInt(fi));
                 @memcpy(dest, src);
             }
         }

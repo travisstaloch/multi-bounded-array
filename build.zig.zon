@@ -1,7 +1,8 @@
 .{
-    .name = "multi-bounded-array",
+    .name = .multi_bounded_array,
     .version = "0.0.0",
     .minimum_zig_version = "0.14.0",
+    .fingerprint = 0xbfd38f26f24ba33,
     .dependencies = .{},
     .paths = .{
         "build.zig",

@@ -10,18 +10,18 @@ values and thus may be copied.
 
 # Usage
 ```console
-$ zig fetch --save=multi-bounded-array git+https://github.com/travisstaloch/multi-bounded-array#main"
+$ zig fetch --save=multi_bounded_array git+https://github.com/travisstaloch/multi-bounded-array#main"
 ```
 
 ```zig
 // build.zig
-const dep = b.dependency("multi-bounded-array", .{ .optimize = optimize, .target = target });
-exe.root_module.addImport("multi-bounded-array", dep.module("multi-bounded-array"));
+const dep = b.dependency("multi_bounded_array", .{ .optimize = optimize, .target = target });
+exe.root_module.addImport("multi_bounded_array", dep.module("multi_bounded_array"));
 ```
 
 ```zig
 // main.zig
-const MultiBoundedArray = @import("multi-bounded-array").MultiBoundedArray;
+const MultiBoundedArray = @import("multi_bounded_array").MultiBoundedArray;
 var a = MultiBoundedArray(struct { int: u8, float: f32 }, 64){};
 // ...
 ```
