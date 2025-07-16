@@ -15,9 +15,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     const tests_check = b.addTest(.{
-        .root_source_file = b.path("lib.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("lib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     const check_step = b.step("check", "Check that we build");
